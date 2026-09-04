@@ -1,0 +1,12 @@
+# Build and simulation artifacts
+build/
+*.vvp
+*.vcd
+
+# Tool logs and dumps
+*.log
+
+# Editor / OS files
+.DS_Store
+*~
+*.swp
