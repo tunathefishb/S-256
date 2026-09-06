@@ -1,164 +1,196 @@
-# Project: S-256 CMU Hardening & Upgrade
+# Project: S-256 Baseline P-Core and E-Core Processors
 
 ## Architecture
-The S-256 Clock and Reset Management Unit (CMU) is responsible for generating, dividing, multiplexing, and gating clocks across 5 independent SoC domains (`clk_sys`, `clk_mem`, `clk_ring`, `clk_gpu`, `clk_core`), and executing deterministic staged reset release and domain-isolated software warm resets.
+The S-256 processor architecture implements a clean 64-bit datapath with 32 general-purpose registers (64-bit width, r0 hardwired to 0) executing a compact 32-bit fixed-length 16-instruction orthogonal RISC ISA.
+Both the P-core (`big_core`) and E-core (`little_core`) execute the identical 64-bit datapath ISA and pipeline baseline, laying the foundation for future P-core coprocessor/SIMD extensions.
+Clock and reset disciplines strictly follow S-256 standards: active-low asynchronous assert, synchronous deassert reset `rst_ni`.
 
+### Inter-Module Dataflow
+```text
+[Instruction Memory] --> [Instruction Decoder] --> Control Signals & 64-bit sign-extended imm
+                                  |
+                                  v
+                      [32x64-bit Register File] (r0=0, internal write-through forwarding)
+                                  |
+                                  v
+                         [64-bit ALU] <--> Memory Address / Data Bus
+                                  |
+                                  v
+                     [PC / Next-PC Control] --> [Data Memory Interface]
 ```
-                                  +---------------------------------------------+
-                                  |                   CMU Top                   |
-                                  |                                             |
-   clk_in (100MHz Ref Osc) ------>+-----> [clk_sys Divider & ICG] -------------> clk_sys
-   rst_ni (Async Hard Reset) ---->+                                             rst_sys_ni
-                                  |                                             
-                                  |   +-------------------------------------+   
-   comms_bus_if (via bus ports) ->+-->|               CSR File              |   
-                                  |   +--+----------+----------+----------+-+   
-                                  |      |          |          |          |     
-                                  |      v          v          v          v     
-                                  |   [Div Cfg] [Gate En] [Src Sel] [Warm Rst]  
-                                  |      |          |          |          |     
-                                  |      |  +-------+----------+          |     
-                                  |      |  |                             |     
-                                  |   +--v--v-----------+                 |     
-                                  |   | PLL Monitors    |<-- PLL Lock     |     
-                                  |   | Loss-of-Lock    |                 |     
-                                  |   +--------+--------+                 |     
-                                  |            |                          |     
-                                  |            v (Force Bypass)           |     
-                                  |   +--------+--------+                 |     
-                                  |   | Glitch-Free Mux |                 |     
-                                  |   +--------+--------+                 |     
-                                  |            |                          |     
-                                  |            v                          |     
-                                  |   +--------+--------+                 |     
-                                  |   | Dynamic Divider |                 |     
-                                  |   +--------+--------+                 |     
-                                  |            |                          |     
-                                  |            v                          |     
-                                  |   +--------+--------+                 |     
-                                  |   | Flop-Based ICG  +---------------> clk_domain
-                                  |   +-----------------+                       
-                                  |                                             
-                                  |   +-------------------------------------+   
-                                  |   | Sequenced Reset Controller          |   
-                                  |   | (Hard rst + FSM Release + Warm Rst) |   
-                                  |   +------------------+------------------+   
-                                  |                      |                      
-                                  |                      v                      
-                                  |            [Domain reset_sync] -------------> rst_domain_ni
-                                  +---------------------------------------------+
-```
-
-### Key Architectural Decisions
-1. **Glitch-Free Clock Multiplexing (GFMUX)**: Negative-edge dual-flop feedback handshaking with dual-stage interlock (`(~sync1) & (~sync2)`) and dead-clock override counter on `clk0` to prevent deadlocks when a PLL halts high.
-2. **Integrated Clock Gating (ICG)**: Negative-edge flop-based clock gating (`always_ff @(negedge clk)`) guaranteeing zero runt pulses, zero inferred latches, and clean linting under `iverilog -g2012 -Wall`.
-3. **Dynamic Clock Division**: Terminal-count shadow latching and internal glitch-free bypass mux for seamless frequency scaling ($N=1..64$).
-4. **PLL Lock Monitoring**: 2-stage synchronization, debounce filtering, instantaneous loss-of-lock fallback, and W1C sticky error flags.
-5. **Deterministic Staged Boot**: Interconnect/Memory $\rightarrow$ GPU $\rightarrow$ CPU Cores with configurable stage transition delays (`CMU_BOOT_STAGE_DELAY`), fixing the observed race where Core exited reset prematurely.
-6. **Isolated Warm Reset**: 16-cycle pulse-stretched reset assertion per domain, without interfering with unselected domains.
-7. **Toolchain Compatibility**: SystemVerilog 2012 IEEE standard, discrete bus ports on `cmu` matching `comms_bus_if` signals to maintain strict compatibility with `iverilog 12.0`.
-
----
 
 ## Feature Inventory
-| # | Feature | Description | Milestone | Source | Status |
-|---|---------|-------------|-----------|--------|:------:|
-| 1 | Multi-Domain Clock Distribution | Generate 5 domain clocks (`clk_sys`, `clk_mem`, `clk_ring`, `clk_gpu`, `clk_core`) | M_IMPL | R1, survey | **VERIFIED** |
-| 2 | Glitch-Free Clock Multiplexing (GFMUX) | Dual-flop handshake + dual-stage interlock + dead-clock override | M_IMPL | R1, R3, survey | **VERIFIED** |
-| 3 | Dynamic Clock Dividers | Integer division ($N=1..64$) with terminal-count shadow latching | M_IMPL | R1, survey | **VERIFIED** |
-| 4 | Glitch-Free Integrated Clock Gating (ICG) | Flop-based negative-edge ICG cells for clean low-power clock gating | M_IMPL | R2, survey | **VERIFIED** |
-| 5 | SoC Package Definitions | Domain enums, bitmasks, FSM states, register offsets, bitfield structs | M_IMPL | R4, survey | **VERIFIED** |
-| 6 | Interconnect Interface Extension | `comms_bus_if` read/write memory-mapped signal extensions | M_IMPL | R4, survey | **VERIFIED** |
-| 7 | PLL Lock Monitoring & Debounce | 2-stage synchronization and debounce filtering for all domain PLL locks | M_IMPL | R3, survey | **VERIFIED** |
-| 8 | Instantaneous Loss-of-Lock Fallback | Auto-switch affected domain GFMUX to `clk_in` on loss of lock | M_IMPL | R3, survey | **VERIFIED** |
-| 9 | Sticky Loss-of-Lock Error Flags | W1C latched fault flags in CSR for transient/permanent PLL faults | M_IMPL | R3, survey | **VERIFIED** |
-| 10 | Sequenced Domain Boot Controller | Staged reset release (MEM/RING $\rightarrow$ GPU $\rightarrow$ CORE) with configurable delays | M_IMPL | R5, survey | **VERIFIED** |
-| 11 | Domain-Isolated Software Warm Reset | Targetable 16-cycle warm reset pulse per domain leaving other domains running | M_IMPL | R5, survey | **VERIFIED** |
-| 12 | Memory-Mapped CSR Register File | 20 registers across 4 KB aperture at `0x1000_0000` via bus interface | M_IMPL | R4, survey | **VERIFIED** |
-| 13 | Global Gate & Bypass Controls | Software override and manual bypass selection via CSRs | M_IMPL | R2, R4, survey | **VERIFIED** |
-| 14 | Top-Level Integration & Wiring | Complete `system/cmu.sv` wiring and Makefile build integration | M_IMPL | R1-R5, survey | **VERIFIED** |
-| 15 | E2E Testbench Infrastructure | Self-checking monitors, frequency measurement, runt pulse detection | M_E2E | Criteria, survey | **VERIFIED** |
-| 16 | E2E Test Suite (Tiers 1-4) | Comprehensive test coverage across all requirements and corner cases (152 checks) | M_E2E | Criteria, survey | **VERIFIED** |
-| 17 | Final Acceptance & Coverage Hardening | 100% E2E test pass + adversarial coverage hardening (Tier 5, 90 checks) | M_FINAL | Criteria, survey | **VERIFIED** |
-
----
+| # | Feature | Description | Milestone | Source |
+|---|---------|-------------|-----------|--------|
+| 1 | `OP_GROUP_ARITH` (2'b00) | Group opcode definition for arithmetic operations | M1 | ORIGINAL_REQUEST §R1 |
+| 2 | `OP_GROUP_LOGIC` (2'b01) | Group opcode definition for logical operations | M1 | ORIGINAL_REQUEST §R1 |
+| 3 | `OP_GROUP_MEM` (2'b10) | Group opcode definition for memory/data operations | M1 | ORIGINAL_REQUEST §R1 |
+| 4 | `OP_GROUP_CTRL` (2'b11) | Group opcode definition for control flow operations | M1 | ORIGINAL_REQUEST §R1 |
+| 5 | `OP_ADD` (4'b0000) | 64-bit addition: rd = rs1 + rs2 | M2 | ORIGINAL_REQUEST §R1 |
+| 6 | `OP_SUB` (4'b0001) | 64-bit subtraction: rd = rs1 - rs2 | M2 | ORIGINAL_REQUEST §R1 |
+| 7 | `OP_SHL` (4'b0010) | 64-bit logical shift left: rd = rs1 << rs2[5:0] | M2 | ORIGINAL_REQUEST §R1 |
+| 8 | `OP_SHR` (4'b0011) | 64-bit logical shift right: rd = rs1 >> rs2[5:0] | M2 | ORIGINAL_REQUEST §R1 |
+| 9 | `OP_AND` (4'b0100) | 64-bit bitwise AND: rd = rs1 & rs2 | M2 | ORIGINAL_REQUEST §R1 |
+| 10 | `OP_OR` (4'b0101) | 64-bit bitwise OR: rd = rs1 \| rs2 | M2 | ORIGINAL_REQUEST §R1 |
+| 11 | `OP_XOR` (4'b0110) | 64-bit bitwise XOR: rd = rs1 ^ rs2 | M2 | ORIGINAL_REQUEST §R1 |
+| 12 | `OP_NOT` (4'b0111) | 64-bit bitwise NOT: rd = ~rs1 | M2 | ORIGINAL_REQUEST §R1 |
+| 13 | `OP_LOAD` (4'b1000) | 64-bit memory load: rd = Mem[rs1 + sign_ext(imm13)] | M3 | ORIGINAL_REQUEST §R1 |
+| 14 | `OP_STORE` (4'b1001) | 64-bit memory store: Mem[rs1 + sign_ext(imm13)] = rs2 | M3 | ORIGINAL_REQUEST §R1 |
+| 15 | `OP_MOV` (4'b1010) | Register move: rd = rs1 | M3 | ORIGINAL_REQUEST §R1 |
+| 16 | `OP_LDI` (4'b1011) | Load sign-extended 13-bit immediate: rd = sign_ext(imm13) | M3 | ORIGINAL_REQUEST §R1 |
+| 17 | `OP_BEQ` (4'b1100) | Branch if rs1 == rs2: PC = PC + (sign_ext(imm13) << 2) | M3 | ORIGINAL_REQUEST §R1 |
+| 18 | `OP_BNE` (4'b1101) | Branch if rs1 != rs2: PC = PC + (sign_ext(imm13) << 2) | M3 | ORIGINAL_REQUEST §R1 |
+| 19 | `OP_CALL` (4'b1110) | Subroutine call: r31 (or rd) = PC + 4, PC = PC + (sign_ext(imm13) << 2) | M3 | ORIGINAL_REQUEST §R1 |
+| 20 | `OP_JMP` (4'b1111) | Unconditional jump: if rs1!=0 target=R[rs1]+sign_ext(imm13) else target=PC+(sign_ext(imm13)<<2) | M3 | ORIGINAL_REQUEST §R1 |
+| 21 | Instruction Word Struct `inst_t` | 32-bit packed format: opcode[31:28], rd[27:23], rs1[22:18], rs2[17:13], imm13[12:0] | M1 | ORIGINAL_REQUEST §R1 |
+| 22 | Architecture Parameters | XLEN=64, ILEN=32, NUM_GPR=32, ALU opcodes/types | M1 | ORIGINAL_REQUEST §R1 |
+| 23 | 64-bit ALU (`core/common/alu.sv`) | 64-bit arithmetic & logical operations + flags (Z, N, C, V) | M2 | ORIGINAL_REQUEST §R2 |
+| 24 | 32x64-bit Regfile (`core/common/regfile.sv`) | 32 general-purpose 64-bit registers, r0=0 hardwired, parameterized FORWARDING | M2 | ORIGINAL_REQUEST §R2 |
+| 25 | 32-bit Instruction Decoder (`core/common/decoder.sv`) | Decodes 32-bit words, generates control signals and sign-extended 64-bit immediates | M2 | ORIGINAL_REQUEST §R2 |
+| 26 | P-Core Implementation (`core/big_core.sv`) | 64-bit single-cycle baseline datapath executing 16-instruction ISA, `rst_ni` active-low reset | M3 | ORIGINAL_REQUEST §R2 |
+| 27 | E-Core Implementation (`core/little_core.sv`) | 64-bit single-cycle baseline datapath executing identical 16-instruction ISA, `rst_ni` | M3 | ORIGINAL_REQUEST §R2 |
+| 28 | Harvard Memory Interface | Separate 64-bit instruction and data memory buses with byte strobes & reset gating | M3 | ORIGINAL_REQUEST §R2 |
+| 29 | Register Bypass / Forwarding | Parameterized bypass in regfile (FORWARDING=1 for unit test, FORWARDING=0 for loop-free single-cycle datapath) | M2 | ORIGINAL_REQUEST §R2 |
+| 30 | Control Flow Execution Engine | PC calculation for loops, branch forward/backward, call/return resolution | M3 | ORIGINAL_REQUEST §R3 |
+| 31 | Verification Testbench (`tb/core_tb.sv`) | Dual-core testbench verifying all 16 instructions, hazards, memory, and sample program | M4 | ORIGINAL_REQUEST §R3 |
+| 32 | Makefile Target (`test_cores`) | Build and execution target via `iverilog -g2012 -I include -Wall` and `vvp` | M4 | ORIGINAL_REQUEST §R3 |
+| 33 | Zero Warning Compiler Idioms | Pre-sliced continuous assignment wires outside procedural blocks avoiding iverilog 12.0 warnings | M2 | AGENTS.md & ORIGINAL_REQUEST §R3 |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
-|---|------|-------|-------------|:------:|
-| M_IMPL | CMU RTL Implementation Track | `include/soc_pkg.sv`, `interconnect/interfaces.sv`, `lib/glitch_free_clock_mux.sv`, `lib/clock_divider.sv`, `lib/clock_gater.sv`, `system/cmu_pll_monitor.sv`, `system/cmu_reset_sequencer.sv`, `system/cmu.sv`, `Makefile` | none | **DONE** |
-| M_E2E | E2E Testing Track | `TEST_INFRA.md`, `tb/cmu_tb.sv` (Tiers 1-4), `TEST_READY.md` | none | **DONE** |
-| M_FINAL | Dual Track Convergence & Hardening | Verify 100% passing E2E suite, 2 Reviewers, 2 Challengers (Tier 5), 1 Forensic Auditor | M_IMPL, M_E2E | **DONE** |
-
----
+|---|------|-------|-------------|--------|
+| 1 | ISA & Datapath Definitions | Append ISA opcodes, groups, parameters, and `inst_t` to `include/soc_pkg.sv` | none | DONE |
+| 2 | Shared Execution Primitives | Implement `core/common/alu.sv`, `core/common/regfile.sv`, `core/common/decoder.sv` | M1 | DONE |
+| 3 | Core Datapaths (`big_core` & `little_core`) | Implement `core/big_core.sv` and `core/little_core.sv` with memory interfaces and `rst_ni` | M2 | DONE |
+| 4 | Verification Suite & Makefile Target | Implement `tb/core_tb.sv` and add `test_cores` target to `Makefile` | M3 | DONE |
+| 5 | E2E Verification & Adversarial Coverage Hardening | Run complete test suite, verify dual-core parity, zero warnings, adversarial stress testing | M4 | DONE |
 
 ## Interface Contracts
 
-### 1. `include/soc_pkg.sv`
-- Base Address: `CMU_BASE_ADDR = 32'h1000_0000`
-- Register offsets: `0x000` (`CMU_REG_CTRL`) through `0x048` (`CMU_REG_RESET_STATUS`), `0x0FC` (`CMU_REG_VERSION`)
-- Domain mask: Bit 0=SYS, 1=MEM, 2=RING, 3=GPU, 4=CORE
-- Enums: `cmu_domain_e`, `cmu_boot_state_e`
-- Response codes: `COMMS_RESP_OKAY = 2'b00`, `COMMS_RESP_SLVERR = 2'b10`
-
-### 2. `interconnect/interfaces.sv` (`comms_bus_if`)
+### 1. `soc_pkg.sv` Datatypes
 ```systemverilog
-interface comms_bus_if (input logic clk);
-    logic [31:0] addr;
-    logic [31:0] wdata;
-    logic [31:0] rdata;
-    logic        wen;
-    logic        ren;
-    logic        valid;
-    logic        ready;
-    logic [1:0]  resp;
-    logic [31:0] cmd; // Legacy compatibility
-    modport master (input clk, ready, rdata, resp, output addr, wdata, wen, ren, valid, cmd);
-    modport slave  (input clk, addr, wdata, wen, ren, valid, cmd, output ready, rdata, resp);
-endinterface
+typedef enum logic [1:0] {
+    OP_GROUP_ARITH = 2'b00,
+    OP_GROUP_LOGIC = 2'b01,
+    OP_GROUP_MEM   = 2'b10,
+    OP_GROUP_CTRL  = 2'b11
+} op_group_e;
+
+typedef enum logic [3:0] {
+    OP_ADD   = 4'b0000,
+    OP_SUB   = 4'b0001,
+    OP_SHL   = 4'b0010,
+    OP_SHR   = 4'b0011,
+    OP_AND   = 4'b0100,
+    OP_OR    = 4'b0101,
+    OP_XOR   = 4'b0110,
+    OP_NOT   = 4'b0111,
+    OP_LOAD  = 4'b1000,
+    OP_STORE = 4'b1001,
+    OP_MOV   = 4'b1010,
+    OP_LDI   = 4'b1011,
+    OP_BEQ   = 4'b1100,
+    OP_BNE   = 4'b1101,
+    OP_CALL  = 4'b1110,
+    OP_JMP   = 4'b1111
+} opcode_e;
+
+typedef struct packed {
+    logic [3:0]  opcode; // [31:28]
+    logic [4:0]  rd;     // [27:23]
+    logic [4:0]  rs1;    // [22:18]
+    logic [4:0]  rs2;    // [17:13]
+    logic [12:0] imm13;  // [12:0]
+} inst_t;
+
+typedef struct packed {
+    logic zero;
+    logic negative;
+    logic carry;
+    logic overflow;
+} alu_flags_t;
 ```
 
-### 3. CMU Top-Level Port Contract (`system/cmu.sv`)
+### 2. `alu.sv` Module Contract
 ```systemverilog
-module cmu (
-    input  logic        clk_in,
-    input  logic        rst_ni,
-    // Discrete bus ports matching comms_bus_if (for iverilog compatibility)
-    input  logic [31:0] bus_addr,
-    input  logic [31:0] bus_wdata,
-    input  logic        bus_wen,
-    input  logic        bus_ren,
-    input  logic        bus_valid,
-    output logic        bus_ready,
-    output logic [31:0] bus_rdata,
-    output logic [1:0]  bus_resp,
-    // Clock & Synchronized Reset Outputs
-    output logic        clk_sys,  rst_sys_ni,
-    output logic        clk_mem,  rst_mem_ni,
-    output logic        clk_ring, rst_ring_ni,
-    output logic        clk_gpu,  rst_gpu_ni,
-    output logic        clk_core, rst_core_ni
+module alu (
+    input  logic [3:0]        alu_op,
+    input  logic [63:0]       op_a,
+    input  logic [63:0]       op_b,
+    output logic [63:0]       alu_res,
+    output alu_flags_t        alu_flags
 );
 ```
 
-### 4. Primitives Contracts (`lib/` & `system/`)
-- `glitch_free_clock_mux (clk0, rst_clk0_ni, clk1, rst_clk1_ni, sel, force_bypass, clk_out)`
-- `clock_divider #(MAX_DIV) (clk_in, rst_ni, div_val[7:0], clk_out)`
-- `clock_gater (clk_in, rst_ni, enable, test_en, clk_out)`
-- `cmu_pll_monitor #(DEBOUNCE_CYCLES) (clk_sys, rst_sys_ni, pll_locked_raw, clear_sticky_err, pll_locked_sync, loss_of_lock_sticky, force_bypass)`
-- `cmu_reset_sequencer (clk_sys, rst_sys_ni, rst_ni, all_plls_locked, cfg_delay_mem_to_gpu, cfg_delay_gpu_to_core, req_warm_rst_*, fsm_release_*, warm_rst_busy_*, boot_state, boot_done)`
+### 3. `regfile.sv` Module Contract
+```systemverilog
+module regfile #(
+    parameter bit FORWARDING = 1'b1
+) (
+    input  logic        clk,
+    input  logic        rst_ni,
+    input  logic [4:0]  raddr1,
+    output logic [63:0] rdata1,
+    input  logic [4:0]  raddr2,
+    output logic [63:0] rdata2,
+    input  logic        wen,
+    input  logic [4:0]  waddr,
+    input  logic [63:0] wdata
+);
+```
 
----
+### 4. `decoder.sv` Module Contract
+```systemverilog
+module decoder (
+    input  logic [31:0] inst,
+    output logic [3:0]  opcode,
+    output logic [1:0]  op_group,
+    output logic [4:0]  rd,
+    output logic [4:0]  rs1,
+    output logic [4:0]  rs2,
+    output logic [12:0] imm13,
+    output logic [63:0] imm64_sext,
+    output logic        reg_write,
+    output logic        mem_read,
+    output logic        mem_write,
+    output logic        is_branch,
+    output logic        is_jump,
+    output logic        is_call,
+    output logic        alu_src_imm,
+    output logic        illegal_inst
+);
+```
+
+### 5. `big_core.sv` & `little_core.sv` Core Port Contracts
+```systemverilog
+module big_core (
+    input  logic        clk,
+    input  logic        rst_ni,
+    // Instruction memory interface
+    output logic [63:0] imem_addr,
+    input  logic [31:0] imem_rdata,
+    // Data memory interface
+    output logic [63:0] dmem_addr,
+    output logic [63:0] dmem_wdata,
+    output logic [7:0]  dmem_wstrb,
+    output logic        dmem_wen,
+    output logic        dmem_ren,
+    input  logic [63:0] dmem_rdata
+);
+```
 
 ## Code Layout
-- `include/soc_pkg.sv`: Global package definitions (VERIFIED)
-- `interconnect/interfaces.sv`: Bus interfaces (VERIFIED)
-- `lib/glitch_free_clock_mux.sv`: Glitch-free multiplexer with dead-clock override (VERIFIED)
-- `lib/clock_divider.sv`: Dynamic integer clock divider (VERIFIED)
-- `lib/clock_gater.sv`: Flop-based Integrated Clock Gating (VERIFIED)
-- `system/cmu_pll_monitor.sv`: PLL monitor & loss-of-lock detector (VERIFIED)
-- `system/cmu_reset_sequencer.sv`: Staged reset sequencer & warm reset (VERIFIED)
-- `system/cmu.sv`: Top-level CMU module (VERIFIED)
-- `Makefile`: Build rules and target test_cmu (VERIFIED)
-- `tb/cmu_tb.sv`: Comprehensive verification testbench (VERIFIED)
-- `TEST_READY.md`: E2E suite readiness signal (VERIFIED)
+```text
+include/
+└── soc_pkg.sv              # Appended with ISA opcodes, parameters, inst_t, alu_flags_t
+core/
+├── common/
+│   ├── alu.sv              # 64-bit ALU
+│   ├── regfile.sv          # 32x64-bit Register File (r0=0, write-through forwarding)
+│   └── decoder.sv          # 32-bit Instruction Decoder & Sign Extension
+├── big_core.sv             # Baseline P-Core
+└── little_core.sv          # Baseline E-Core
+tb/
+└── core_tb.sv              # Verification testbench for both cores
+Makefile                    # Contains test_cores build and execution target
+```
