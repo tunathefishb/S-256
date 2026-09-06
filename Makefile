@@ -1,51 +1,72 @@
-# Makefile for S-256 SoC RTL Testbenches
+# ==============================================================================
+# S-256 SoC Build & Verification Makefile
+# ==============================================================================
 
-# Toolchain
-IVERILOG = iverilog
-VVP = vvp
-
-# Compilation Flags
-# -g2012: Enable SystemVerilog 2012 features
-# -I include: Add include directory to search path
-IVLFLAGS = -g2012 -I include -Wall -Wno-timescale
+# Toolchain & Flags
+IVERILOG ?= iverilog
+VVP      ?= vvp
+GTKWAVE  ?= gtkwave
+IVLFLAGS  = -g2012 -I include -Wall -Wno-timescale
 
 # Directories
-TB_DIR = tb
-LIB_DIR = lib
+TB_DIR    = tb
+LIB_DIR   = lib
 BUILD_DIR = build
 
-# Global Package Sources (included in most compilations)
-PKG_SRC = include/soc_pkg.sv
+# Core Shared Sources
+PKG_SRC   = include/soc_pkg.sv
+INTF_SRC  = interconnect/interfaces.sv
+LIB_SRC   = $(wildcard $(LIB_DIR)/*.sv)
 
-# Interconnect Interface Sources
-INTF_SRC = interconnect/interfaces.sv
+# Active Verification Targets
+TESTS     = test_cmu test_cmu_adversarial
 
-# Global Library Sources (utility modules used across the SoC)
-LIB_SRC = $(wildcard $(LIB_DIR)/*.sv)
+.PHONY: all help test test_all clean lint $(TESTS)
 
-# ==============================================================================
-# Testbench Definitions
-# ==============================================================================
+all: $(addprefix $(BUILD_DIR)/, $(addsuffix .vvp, $(subst test_,,$(TESTS))))
 
-# Default target
-.PHONY: all clean
-all: test_cmu
+help:
+	@echo "S-256 SoC Verification Targets:"
+	@echo "  make              - Compile all active testbenches"
+	@echo "  make test         - Run full regression test suite"
+	@echo "  make test_cmu     - Run CMU E2E testbench"
+	@echo "  make view_cmu     - View CMU waveforms in GTKWave"
+	@echo "  make lint         - Check syntax across all RTL files"
+	@echo "  make clean        - Remove build artifacts and waveforms"
 
-# --- CMU Testbench ---
-CMU_SRC = $(INTF_SRC) \
+# --- CMU Testbenches ---
+CMU_RTL = $(INTF_SRC) \
           system/cmu_pll_monitor.sv \
           system/cmu_reset_sequencer.sv \
           system/cmu.sv
-CMU_TB  = $(TB_DIR)/cmu_tb.sv
 
-.PHONY: test_cmu
-test_cmu: $(BUILD_DIR)/cmu_tb.vvp
-	cd $(BUILD_DIR) && $(VVP) cmu_tb.vvp
-
-$(BUILD_DIR)/cmu_tb.vvp: $(PKG_SRC) $(LIB_SRC) $(CMU_SRC) $(CMU_TB)
+$(BUILD_DIR)/cmu_tb.vvp: $(PKG_SRC) $(LIB_SRC) $(CMU_RTL) $(TB_DIR)/cmu_tb.sv
 	@mkdir -p $(BUILD_DIR)
 	$(IVERILOG) $(IVLFLAGS) -s cmu_tb -o $@ $^
 
-# Cleanup
+$(BUILD_DIR)/cmu_adversarial_tb.vvp: $(PKG_SRC) $(LIB_SRC) $(CMU_RTL) $(TB_DIR)/cmu_adversarial_tb.sv
+	@mkdir -p $(BUILD_DIR)
+	$(IVERILOG) $(IVLFLAGS) -s cmu_adversarial_tb -o $@ $^
+
+test_cmu: $(BUILD_DIR)/cmu_tb.vvp
+	cd $(BUILD_DIR) && $(VVP) cmu_tb.vvp
+
+test_cmu_adversarial: $(BUILD_DIR)/cmu_adversarial_tb.vvp
+	cd $(BUILD_DIR) && $(VVP) cmu_adversarial_tb.vvp
+
+test test_all: $(TESTS)
+
+# Open waveform only re-simulating if VCD is missing
+view_cmu: $(BUILD_DIR)/cmu_tb.vcd
+	$(GTKWAVE) $< $(TB_DIR)/cmu_view.gtkw
+
+$(BUILD_DIR)/cmu_tb.vcd: $(BUILD_DIR)/cmu_tb.vvp
+	cd $(BUILD_DIR) && $(VVP) cmu_tb.vvp
+
+# Syntax / Elaboration Check
+lint:
+	@echo "Checking RTL syntax..."
+	$(IVERILOG) $(IVLFLAGS) -s cmu -o /dev/null $(PKG_SRC) $(LIB_SRC) $(CMU_RTL)
+
 clean:
-	rm -rf $(BUILD_DIR) *.vvp *.vcd
+	rm -rf $(BUILD_DIR) *.vvp *.vcd *.log

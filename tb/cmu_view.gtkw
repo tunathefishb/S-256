@@ -1,0 +1,57 @@
+[*]
+[*] GTKWave Save File - S-256 CMU Testbench
+[*]
+[timestart] 0
+[size] 1400 800
+[pos] -1 -1
+*-signals-
+*-group_begin Master Controls
+@28
+cmu_tb.clk_in
+cmu_tb.rst_ni
+*-group_end
+*-group_begin Reset Sequencing & FSM
+@28
+cmu_tb.u_cmu.rst_sys_internal_n
+cmu_tb.u_cmu.all_plls_locked
+cmu_tb.u_cmu.boot_done
+@24
+cmu_tb.u_cmu.boot_state[2:0]
+*-group_end
+*-group_begin Synchronized Domain Resets
+@28
+cmu_tb.rst_sys_ni
+cmu_tb.rst_mem_ni
+cmu_tb.rst_ring_ni
+cmu_tb.rst_gpu_ni
+cmu_tb.rst_core_ni
+*-group_end
+*-group_begin Domain Clocks
+@28
+cmu_tb.clk_sys
+cmu_tb.clk_mem
+cmu_tb.clk_ring
+cmu_tb.clk_gpu
+cmu_tb.clk_core
+*-group_end
+*-group_begin Clock Gating & Bypass
+@22
+cmu_tb.u_cmu.reg_clk_gate_en[4:0]
+cmu_tb.u_cmu.active_bypass_status[4:0]
+cmu_tb.u_cmu.warm_rst_busy[4:0]
+*-group_end
+*-group_begin Comms Bus Interface (CSR)
+@28
+cmu_tb.comms_if.valid
+cmu_tb.comms_if.ready
+cmu_tb.comms_if.wen
+cmu_tb.comms_if.ren
+@22
+cmu_tb.comms_if.addr[31:0]
+cmu_tb.comms_if.wdata[31:0]
+cmu_tb.comms_if.rdata[31:0]
+@28
+cmu_tb.comms_if.resp[1:0]
+*-group_end
+[pattern_trace] 1
+[pattern_trace] 0
